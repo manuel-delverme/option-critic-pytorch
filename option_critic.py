@@ -1,7 +1,7 @@
 from math import exp
-import torch
 
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Bernoulli
@@ -36,7 +36,7 @@ class OptionCriticFeatures(nn.Module):
             nn.Linear(64, num_options),
             nn.Tanh(),
         )
-        self.Q_options = nn.Linear(64, num_actions * num_options)
+        self.Q_options_ = nn.Linear(64, num_actions * num_options)
 
         self.to(device)
         self.train(not testing)
@@ -48,10 +48,14 @@ class OptionCriticFeatures(nn.Module):
         # next_option = Q.argmax(dim=-1)
         return bool(option_termination.item())  # , next_option.item()
 
+    def q_options(self, state, option):
+        Q = self.Q_options_(state).view((-1, self.num_options, self.num_actions))
+        ALL = torch.arange(state.shape[0])
+        Qo = Q[ALL, option.squeeze(-1)]
+        return Qo
+
     def option_pi(self, option, state):
-        logits_Q = self.Q_options(state).reshape(-1, self.num_options, self.num_actions)
-        logits_Qo = logits_Q[torch.arange(logits_Q.shape[0]), option, :].squeeze(1)
-        # logits_Qo = logits_Q.gather(1, option)
+        logits_Qo = self.q_options(state, option)
         action_dist = (logits_Qo / self.temperature).softmax(dim=-1)
         return Categorical(action_dist)
 
@@ -105,7 +109,7 @@ class OptionCriticConv(OptionCriticFeatures):
 
         self.Q = nn.Linear(512, self.num_options)  # Policy-Over-Options
         self.terminations = nn.Linear(512, self.num_options)  # Option-Termination
-        self.Q_options = nn.Linear(512, self.num_actions * self.num_options)
+        self.Q_options_ = nn.Linear(512, self.num_actions * self.num_options)
 
         self.to(self.device)
         self.train(not self.testing)
@@ -122,7 +126,8 @@ class OptionCriticTabular(OptionCriticFeatures):
             nn.Linear(self.in_features, self.num_options),
             nn.Tanh(),
         )
-        self.Q_options = nn.Linear(self.in_features, self.num_actions * self.num_options)
+        self.Q_options_ = nn.Linear(self.in_features, self.num_options * self.num_actions)
+
         self.to(device=device)
 
 
