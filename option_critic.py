@@ -8,7 +8,7 @@ from torch.distributions import Categorical, Bernoulli
 
 
 class OptionCriticFeatures(nn.Module):
-    def __init__(self, in_features, num_actions, num_options, temperature=1.0, eps_start=1.0, eps_min=0.1, eps_decay=int(1e6), eps_test=0.05, device='cpu', testing=False):
+    def __init__(self, in_features, num_actions, num_options, temperature, eps_start=1.0, eps_min=0.1, eps_decay=int(1e6), eps_test=0.05, device='cpu', testing=False):
         super(OptionCriticFeatures, self).__init__()
 
         self.in_features = in_features
@@ -34,7 +34,7 @@ class OptionCriticFeatures(nn.Module):
         self.Q = nn.Linear(64, num_options)  # Policy-Over-Options
         self.terminations = nn.Sequential(
             nn.Linear(64, num_options),
-            nn.Tanh(),
+            nn.Sigmoid(),
         )
         self.Q_options_ = nn.Linear(64, num_actions * num_options)
 
@@ -42,7 +42,7 @@ class OptionCriticFeatures(nn.Module):
         self.train(not testing)
 
     def predict_option_termination(self, state, current_option):
-        termination = self.terminations(state)[:, current_option].sigmoid()
+        termination = self.terminations(state)[:, current_option]
         option_termination = Bernoulli(termination).sample()
         # Q = self.Q(state)
         # next_option = Q.argmax(dim=-1)
@@ -108,7 +108,11 @@ class OptionCriticConv(OptionCriticFeatures):
         )
 
         self.Q = nn.Linear(512, self.num_options)  # Policy-Over-Options
-        self.terminations = nn.Linear(512, self.num_options)  # Option-Termination
+        self.terminations = nn.Sequential(
+            nn.Linear(512, self.num_options),
+            nn.Sigmoid(),
+        )
+
         self.Q_options_ = nn.Linear(512, self.num_actions * self.num_options)
 
         self.to(self.device)
@@ -124,8 +128,11 @@ class OptionCriticTabular(OptionCriticFeatures):
         self.Q = nn.Linear(self.in_features, self.num_options)
         self.terminations = nn.Sequential(
             nn.Linear(self.in_features, self.num_options),
-            nn.Tanh(),
+            nn.Sigmoid(),
         )
+        self.terminations.requires_grad_(False)
+        self.terminations[0].weight.data.zero_()
+
         self.Q_options_ = nn.Linear(self.in_features, self.num_options * self.num_actions)
 
         self.to(device=device)
@@ -183,8 +190,8 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
     option_term_prob = model.terminations(state).gather(-1, options)
     next_options_term_prob = model.terminations(next_state).gather(-1, options).detach()
 
-    Q = model.Q(state).detach().squeeze()
-    next_Q_prime = model_prime.Q(next_state_prime).detach().squeeze()
+    Q = model.Q(state).detach()
+    next_Q_prime = model_prime.Q(next_state_prime).detach()
 
     # Target update gt
     next_continuation_prob = 1 - next_options_term_prob
@@ -201,4 +208,4 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
 
     # actor-critic policy gradient with entropy regularization
     policy_loss = -logps * (gt.detach() - Qo) - entropy_reg * entropies
-    return (termination_loss + policy_loss).sum()
+    return (termination_loss + policy_loss).mean()
