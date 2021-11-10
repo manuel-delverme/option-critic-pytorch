@@ -31,12 +31,12 @@ class OptionCriticFeatures(nn.Module):
             nn.ReLU()
         )
 
-        self.Q = nn.Linear(64, num_options)  # Policy-Over-Options
+        self.OptionValue = nn.Linear(64, num_options)  # Policy-Over-Options
         self.terminations = nn.Sequential(
             nn.Linear(64, num_options),
             nn.Sigmoid(),
         )
-        self.Q_options_ = nn.Linear(64, num_actions * num_options)
+        self.ActionValue = nn.Linear(64, num_actions * num_options)
 
         self.to(device)
         self.train(not testing)
@@ -49,10 +49,10 @@ class OptionCriticFeatures(nn.Module):
         return bool(option_termination.item())  # , next_option.item()
 
     def q_options(self, state, option):
-        Q = self.Q_options_(state).view((-1, self.num_options, self.num_actions))
+        action_value = self.ActionValue(state).view((-1, self.num_options, self.num_actions))
         ALL = torch.arange(state.shape[0])
-        Qo = Q[ALL, option.squeeze(-1)]
-        return Qo
+        Qso = action_value[ALL, option.squeeze(-1)]
+        return Qso
 
     def option_pi(self, option, state):
         logits_Qo = self.q_options(state, option)
@@ -61,20 +61,21 @@ class OptionCriticFeatures(nn.Module):
 
     def get_action(self, state, option):
         action_dist = self.option_pi(option, state)
-        action = action_dist.sample()
+        with torch.no_grad():
+            action = action_dist.sample()
         logp = action_dist.log_prob(action)
         entropy = action_dist.entropy()
 
         return action.unsqueeze(-1), logp.unsqueeze(-1), entropy.unsqueeze(-1)
 
     def greedy_option(self, state):
-        return self.Q(state).argmax(dim=-1).item()
+        return self.OptionValue(state).argmax(dim=-1).item()
 
     def epsgreedy_option(self, state):
         if self.testing and np.random.rand() < self.epsilon:
             current_option = np.random.choice(self.num_options)
         else:
-            current_option = self.Q(state).argmax(dim=-1).item()
+            current_option = self.OptionValue(state).argmax(dim=-1).item()
         return current_option
 
     @property
@@ -107,13 +108,13 @@ class OptionCriticConv(OptionCriticFeatures):
             nn.ReLU()
         )
 
-        self.Q = nn.Linear(512, self.num_options)  # Policy-Over-Options
+        self.OptionValue = nn.Linear(512, self.num_options)  # Policy-Over-Options
         self.terminations = nn.Sequential(
             nn.Linear(512, self.num_options),
             nn.Sigmoid(),
         )
 
-        self.Q_options_ = nn.Linear(512, self.num_actions * self.num_options)
+        self.ActionValue = nn.Linear(512, self.num_actions * self.num_options)
 
         self.to(self.device)
         self.train(not self.testing)
@@ -122,10 +123,10 @@ class OptionCriticConv(OptionCriticFeatures):
 class OptionCriticTabular(OptionCriticFeatures):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        device = self.Q.weight.device
+        device = self.OptionValue.weight.device
 
         self.features = nn.Identity()
-        self.Q = nn.Linear(self.in_features, self.num_options)
+        self.OptionValue = nn.Linear(self.in_features, self.num_options, bias=False)
         self.terminations = nn.Sequential(
             nn.Linear(self.in_features, self.num_options),
             nn.Sigmoid(),
@@ -133,7 +134,7 @@ class OptionCriticTabular(OptionCriticFeatures):
         self.terminations.requires_grad_(False)
         self.terminations[0].weight.data.zero_()
 
-        self.Q_options_ = nn.Linear(self.in_features, self.num_options * self.num_actions)
+        self.ActionValue = nn.Linear(self.in_features, self.num_options * self.num_actions, bias=False)
 
         self.to(device=device)
 
@@ -150,11 +151,11 @@ def critic_loss(model, model_prime, obs, options, rewards, next_obs, dones, disc
 
     # The loss is the TD loss of Q and the update target, so we need to calculate Q
     states = model.features(obs)
-    Q = model.Q(states)
+    Q = model.OptionValue(states)
 
     # the update target contains Q_next, but for stable learning we use prime network for this
     next_states_prime = model_prime.features(next_obs)
-    next_Q_prime = model_prime.Q(next_states_prime)  # detach?
+    next_Q_prime = model_prime.OptionValue(next_states_prime)  # detach?
 
     # Additionally, we need the beta probabilities of the next state
     next_states = model.features(next_obs)
@@ -185,27 +186,26 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
 
     with torch.no_grad():
         next_options_term_prob = model.terminations(model.features(next_obs)).gather(-1, options)
-        Q = model.Q(model.features(obs))
-        next_Q_prime = model_prime.Q(model_prime.features(next_obs))
+        Qmu_s = model.OptionValue(model.features(obs))
+        Qmu_s1 = model_prime.OptionValue(model_prime.features(next_obs))
 
-        # Target update gt
+        # Target update Q_mu_s
         next_continuation_prob = 1 - next_options_term_prob
         masks = ~dones
-        next_Qo = next_Q_prime.gather(-1, options)
-        Vnext = next_Q_prime.max(dim=-1, keepdims=True).values
-        # future_value = next_continuation_prob * next_Qo + next_options_term_prob * Vnext
-        future_value = Vnext
+        Q_mu_s1o = Qmu_s1.gather(-1, options)  # onpolicy vaue
+        V_mu_s1 = Qmu_s1.max(dim=-1, keepdims=True).values  # greedy value
+        v_s1 = next_continuation_prob * Q_mu_s1o + next_options_term_prob * V_mu_s1
+        # v_s1 = V_mu_s1
 
-        gt = rewards + masks * discount * future_value
+        Q_mu_s = rewards + masks * discount * v_s1
+        Q_mu_so = Qmu_s.gather(-1, options)
+        advantage = Q_mu_s - Q_mu_so
 
-        # The termination loss
-        Qo = Q.gather(-1, options)
-        # V = Q.max(dim=-1, keepdims=True).values.detach()
+        V = Qmu_s.max(dim=-1, keepdims=True).values
 
-    # option_term_prob = model.terminations(state).gather(-1, options)
-    # termination_loss = option_term_prob * (Qo.detach() - V + termination_reg) * masks
-    termination_loss = 0.
+    option_term_prob = model.terminations(model.features(obs)).gather(-1, options)
+    termination_loss = option_term_prob * (Q_mu_s - V + termination_reg) * masks
 
     # actor-critic policy gradient with entropy regularization
-    policy_loss = -logps * (gt.detach() - Qo) - entropy_reg * entropies
+    policy_loss = -logps * advantage - entropy_reg * entropies
     return (termination_loss + policy_loss).mean()
