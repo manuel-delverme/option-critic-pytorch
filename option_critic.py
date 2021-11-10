@@ -183,24 +183,26 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
     assert len(entropies.shape) == 2
     assert len(dones.shape) == 2
 
+    with torch.no_grad():
+        next_options_term_prob = model.terminations(model.features(next_obs)).gather(-1, options)
+        Q = model.Q(model.features(obs))
+        next_Q_prime = model_prime.Q(model_prime.features(next_obs))
+
+        # Target update gt
+        next_continuation_prob = 1 - next_options_term_prob
+        masks = ~dones
+        next_Qo = next_Q_prime.gather(-1, options)
+        Vnext = next_Q_prime.max(dim=-1, keepdims=True).values
+        # future_value = next_continuation_prob * next_Qo + next_options_term_prob * Vnext
+        future_value = Vnext
+
+        gt = rewards + masks * discount * future_value
+
+        # The termination loss
+        Qo = Q.gather(-1, options)
+        # V = Q.max(dim=-1, keepdims=True).values.detach()
+
     # option_term_prob = model.terminations(state).gather(-1, options)
-    next_options_term_prob = model.terminations(model.features(next_obs)).gather(-1, options).detach()
-
-    Q = model.Q(model.features(obs)).detach()
-    next_Q_prime = model_prime.Q(model_prime.features(next_obs)).detach()
-
-    # Target update gt
-    next_continuation_prob = 1 - next_options_term_prob
-    masks = ~dones
-    next_Qo = next_Q_prime.gather(-1, options)
-    Vnext = next_Q_prime.max(dim=-1, keepdims=True).values
-    future_value = next_continuation_prob * next_Qo + next_options_term_prob * Vnext
-
-    gt = rewards + masks * discount * future_value
-
-    # The termination loss
-    Qo = Q.gather(-1, options)
-    # V = Q.max(dim=-1, keepdims=True).values.detach()
     # termination_loss = option_term_prob * (Qo.detach() - V + termination_reg) * masks
     termination_loss = 0.
 
