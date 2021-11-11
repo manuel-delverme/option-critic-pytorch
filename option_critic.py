@@ -61,8 +61,8 @@ class OptionCriticFeatures(nn.Module):
 
     def get_action(self, state, option):
         action_dist = self.option_pi(option, state)
-        with torch.no_grad():
-            action = action_dist.sample()
+
+        action = action_dist.sample()
         logp = action_dist.log_prob(action)
         entropy = action_dist.entropy()
 
@@ -126,15 +126,16 @@ class OptionCriticTabular(OptionCriticFeatures):
         device = self.OptionValue.weight.device
 
         self.features = nn.Identity()
-        self.OptionValue = nn.Linear(self.in_features, self.num_options, bias=False)
+        self.OptionValue = nn.Linear(self.in_features, self.num_options)
+        self.OptionValue.weight.data *= 0.01
         self.terminations = nn.Sequential(
             nn.Linear(self.in_features, self.num_options),
             nn.Sigmoid(),
         )
-        self.terminations.requires_grad_(False)
         self.terminations[0].weight.data.zero_()
 
-        self.ActionValue = nn.Linear(self.in_features, self.num_options * self.num_actions, bias=False)
+        self.ActionValue = nn.Linear(self.in_features, self.num_options * self.num_actions)
+        self.ActionValue.weight.data *= 0.01
 
         self.to(device=device)
 
@@ -177,7 +178,7 @@ def critic_loss(model, model_prime, obs, options, rewards, next_obs, dones, disc
 
 
 def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: OptionCriticFeatures, model_prime: OptionCriticFeatures, discount: float, termination_reg: float,
-               entropy_reg: float):
+               entropy_reg: float, returns=None):
     assert len(obs.shape) == 2
     assert len(options.shape) == 2
     assert len(logps.shape) == 2
@@ -199,13 +200,10 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
 
         Q_mu_s = rewards + masks * discount * v_s1
         Q_mu_so = Qmu_s.gather(-1, options)
-        advantage = Q_mu_s - Q_mu_so
+        if returns is None:
+            advantage = Q_mu_s - Q_mu_so
+        else:
+            advantage = returns - Q_mu_so  # We have to wait end of episode
 
-        V = Qmu_s.max(dim=-1, keepdims=True).values
-
-    option_term_prob = model.terminations(model.features(obs)).gather(-1, options)
-    termination_loss = option_term_prob * (Q_mu_s - V + termination_reg) * masks
-
-    # actor-critic policy gradient with entropy regularization
     policy_loss = -logps * advantage - entropy_reg * entropies
-    return (termination_loss + policy_loss).mean()
+    return policy_loss.sum()
