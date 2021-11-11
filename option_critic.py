@@ -204,6 +204,11 @@ def actor_loss(obs, options, logps, entropies, rewards, dones, next_obs, model: 
             advantage = Q_mu_s - Q_mu_so
         else:
             advantage = returns - Q_mu_so  # We have to wait end of episode
+        Vs = Qmu_s.max(dim=-1, keepdims=True).values
 
+    option_term_prob = model.terminations(model.features(obs)).gather(-1, options)
+    termination_loss = option_term_prob * (Q_mu_s - Vs + termination_reg) * masks
+
+    # actor-critic policy gradient with entropy regularization
     policy_loss = -logps * advantage - entropy_reg * entropies
-    return policy_loss.sum()
+    return policy_loss.sum() + termination_loss.sum()
