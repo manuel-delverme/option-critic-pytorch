@@ -54,13 +54,13 @@ class OptionCriticFeatures(nn.Module):
         Qso = action_value[ALL, option.squeeze(-1)]
         return Qso
 
-    def option_pi(self, option, state):
+    def option_pi(self, state, option):
         logits_Qo = self.q_options(state, option)
         action_dist = (logits_Qo / self.temperature).softmax(dim=-1)
         return Categorical(action_dist)
 
     def get_action(self, state, option):
-        action_dist = self.option_pi(option, state)
+        action_dist = self.option_pi(state, option)
 
         action = action_dist.sample()
         logp = action_dist.log_prob(action)
